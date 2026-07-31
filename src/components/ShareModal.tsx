@@ -15,14 +15,14 @@ const SHARE_CHANNELS = [
     icon: XIcon,
     color: 'hover:bg-[#1d9bf0]/10 hover:border-[#1d9bf0]/40 hover:text-[#1d9bf0]',
     href: (url: string, title: string) =>
-      `https://twitter.com/intent/tweet?text=${encodeURIComponent(`Check out "${title}" on IotaChat 🔥`)}&url=${encodeURIComponent(url)}`,
+      `https://twitter.com/intent/tweet?text=${encodeURIComponent(`Check out "${title}" on Drauwper 🔥`)}&url=${encodeURIComponent(url)}`,
   },
   {
     label: 'WhatsApp',
     icon: MessageCircle,
     color: 'hover:bg-[#25d366]/10 hover:border-[#25d366]/40 hover:text-[#25d366]',
     href: (url: string, title: string) =>
-      `https://wa.me/?text=${encodeURIComponent(`Check out "${title}" on IotaChat 🔥 ${url}`)}`,
+      `https://wa.me/?text=${encodeURIComponent(`Check out "${title}" on Drauwper 🔥 ${url}`)}`,
   },
   {
     label: 'Facebook',
@@ -36,7 +36,7 @@ const SHARE_CHANNELS = [
     icon: Send,
     color: 'hover:bg-[#2aabee]/10 hover:border-[#2aabee]/40 hover:text-[#2aabee]',
     href: (url: string, title: string) =>
-      `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(`Check out "${title}" on IotaChat 🔥`)}`,
+      `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(`Check out "${title}" on Drauwper 🔥`)}`,
   },
 ];
 

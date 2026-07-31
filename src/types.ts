@@ -11,6 +11,7 @@ export interface Drop {
   fileSize: string;             // human-readable, e.g. "12.4 MB"
   fileSizeBytes: number | null; // raw bytes from DB
   filePath: string | null;      // S3 key or local path
+  link?: string | null;
   originalFileName: string | null;
   mimeType: string | null;
   scheduledDropTime: number;    // unix ms
@@ -72,7 +73,7 @@ export interface User {
   verification: string; // 'none' | 'false' | 'true'
   // added fields
   accountStatus: string; // 'active' | 'suspended' | 'banned'
-  accountType: string; // 'free' | 'standard' | 'premium' | 'admin'
+  accountPlan: string; // 'free' | 'standard' | 'premium' | 'admin'
 }
 
 export interface CreatorProfile {

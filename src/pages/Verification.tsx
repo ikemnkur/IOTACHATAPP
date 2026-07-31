@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
-  ShieldCheck, Mail, Camera, Upload, CreditCard, ArrowLeft,
-  CheckCircle, AlertCircle, Loader2, RefreshCcw, QrCode, CheckCircle2, Copy,
+  ShieldCheck, Camera, Upload, CreditCard, ArrowLeft, Smartphone,
+  CheckCircle, AlertCircle, Loader2, QrCode, CheckCircle2, Copy, Check,
+  Mail,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { api, ApiError } from '../lib/api';
@@ -10,8 +11,14 @@ import { useAuth } from '../context/AuthContext';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
-type Step = 'email' | 'docs' | 'payment' | 'done';
+type TaskId = 'email' | 'phone' | 'docs' | 'payment';
 type Chain = 'BTC' | 'ETH' | 'LTC' | 'SOL';
+
+type CryptoAddressBook = Record<Chain, string[]>;
+
+interface AccountSettingsResponse {
+  cryptoAddresses?: Partial<Record<Chain, string | string[]>>;
+}
 
 interface CryptoAmounts {
   BTC: { amount1: string; amount2: string };
@@ -25,6 +32,11 @@ interface VerificationData {
   amount1: number;
   amount2: number;
   cryptoAmounts: CryptoAmounts | string;
+  emailVerified?: boolean;
+  phoneNumber?: string;
+  phoneVerified?: boolean;
+  docsUploaded?: boolean;
+  paymentVerified?: boolean;
 }
 
 interface ApiResponse {
@@ -43,6 +55,40 @@ const CURRENCIES = [
   { symbol: 'SOL', name: 'Solana', address: 'qaSpvAumg2L3LLZA8qznFtbrRKYMP1neTGqpNgtCPaU' },
 ];
 
+const TASKS: { id: TaskId; label: string; icon: typeof Camera }[] = [
+  { id: 'email', label: 'Email', icon: Mail },
+  { id: 'phone', label: 'Phone', icon: Smartphone },
+  { id: 'docs', label: 'Upload ID', icon: Camera },
+  { id: 'payment', label: 'Crypto', icon: CreditCard },
+];
+
+const EMPTY_ADDRESS_BOOK: CryptoAddressBook = {
+  BTC: [],
+  ETH: [],
+  LTC: [],
+  SOL: [],
+};
+
+function normalizeAddressEntries(raw: unknown): string[] {
+  const values = Array.isArray(raw)
+    ? raw
+    : String(raw || '')
+      .split(/[,\n]/)
+      .map((item) => item.trim());
+
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function parseCryptoAddressBook(raw: AccountSettingsResponse['cryptoAddresses']): CryptoAddressBook {
+  if (!raw || typeof raw !== 'object') return EMPTY_ADDRESS_BOOK;
+  return {
+    BTC: normalizeAddressEntries(raw.BTC),
+    ETH: normalizeAddressEntries(raw.ETH),
+    LTC: normalizeAddressEntries(raw.LTC),
+    SOL: normalizeAddressEntries(raw.SOL),
+  };
+}
+
 function validateEmail(value: string) {
   const i = value.indexOf('@');
   return i > 0 && value.lastIndexOf('.') > i && !value.endsWith('.') && !value.endsWith('@');
@@ -53,19 +99,20 @@ function validateEmail(value: string) {
 export default function Verification() {
   const { user, refreshUser } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
 
-  // ── Derived initial state ──
   const queryParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const taskFromUrl = (queryParams.get('task') as TaskId | null) || null;
   const emailFromUrl = queryParams.get('email') || '';
   const codeFromUrl = queryParams.get('code') || '';
 
   // ── Shared state ──
-  const [step, setStep] = useState<Step>('email');
+  const [active, setActive] = useState<TaskId>(taskFromUrl || 'email');
   const [verificationData, setVerificationData] = useState<VerificationData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // ── Step 1: Email verification ──
+  // ── Independent completion flags (no forced order) ──
   const [email, setEmail] = useState(emailFromUrl || user?.email || '');
   const [verificationCode, setVerificationCode] = useState(codeFromUrl || '');
   const [emailVerifying, setEmailVerifying] = useState(false);
@@ -74,16 +121,26 @@ export default function Verification() {
   const [emailStatus, setEmailStatus] = useState('');
   const [emailStatusType, setEmailStatusType] = useState<'' | 'success' | 'error' | 'info'>('');
   const [autoVerifyAttempted, setAutoVerifyAttempted] = useState(false);
+  const [phoneVerified, setPhoneVerified] = useState(false);
+  const [docsUploaded, setDocsUploaded] = useState(false);
+  const [paymentVerified, setPaymentVerified] = useState(false);
 
-  // ── Step 2: Doc upload ──
+  // ── Phone/SMS ──
+  const [phone, setPhone] = useState('');
+  const [otp, setOtp] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
+  const [smsBusy, setSmsBusy] = useState(false);
+  const [smsStatus, setSmsStatus] = useState('');
+  const [smsStatusType, setSmsStatusType] = useState<'' | 'success' | 'error' | 'info'>('');
+
+  // ── Doc upload ──
   const [facePic, setFacePic] = useState<File | null>(null);
   const [idPhoto, setIdPhoto] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [docsUploaded, setDocsUploaded] = useState(false);
   const facePicRef = useRef<HTMLInputElement>(null);
   const idPhotoRef = useRef<HTMLInputElement>(null);
 
-  // ── Step 3: Crypto payment ──
+  // ── Crypto payment ──
   const [walletAddress, setWalletAddress] = useState('');
   const [txHash, setTxHash] = useState('');
   const [txHash2, setTxHash2] = useState('');
@@ -91,40 +148,46 @@ export default function Verification() {
   const [currencyIdx, setCurrencyIdx] = useState(0);
   const [copied, setCopied] = useState(false);
   const [showQr, setShowQr] = useState(false);
+  const [addressBook, setAddressBook] = useState<CryptoAddressBook>(EMPTY_ADDRESS_BOOK);
+  const [addressLoading, setAddressLoading] = useState(false);
+  const [showMissingAddressModal, setShowMissingAddressModal] = useState(false);
+  const [redirectingToSettings, setRedirectingToSettings] = useState(false);
 
   const currency = CURRENCIES[currencyIdx];
   const chain = currency.symbol as Chain;
+  const walletOptions = addressBook[chain] || [];
+
+  const allDone = emailVerified && phoneVerified && docsUploaded && paymentVerified;
 
   // ── Fetch verification state on mount ──
   useEffect(() => {
     if (!user) { setLoading(false); return; }
-    api.post<{ user: VerificationData }>('/api/user', { email: user.email })
-      .then((res) => {
+    Promise.all([
+      api.post<{ user: VerificationData }>('/api/user', { email: user.email }),
+      api.post<{ verified: boolean }>('/api/auth/email-verification-status', { email: user.email }),
+      api.post<{ verified: boolean }>('/api/auth/phone-verification-status', { email: user.email, userId: user.id }),
+    ])
+      .then(([res, emailState, phoneState]) => {
         const u = res.user as unknown as Record<string, unknown>;
         const data: VerificationData = {
           verification: (u.verification as string) || 'none',
           amount1: Number(u.amount1) || 0,
           amount2: Number(u.amount2) || 0,
           cryptoAmounts: (u.cryptoAmounts as CryptoAmounts | string) || '',
+          phoneNumber: (u.phoneNumber as string) || '',
+          emailVerified: !!emailState.verified,
+          phoneVerified: !!phoneState.verified || Boolean(u.phoneVerified),
+          docsUploaded: Boolean(u.docsUploaded),
+          paymentVerified: Boolean(u.paymentVerified),
         };
         setVerificationData(data);
+        if (data.phoneNumber) setPhone(data.phoneNumber);
 
-        if (data.verification === 'true') {
-          setStep('done');
-          setEmailVerified(true);
-          setDocsUploaded(true);
-        } else if (data.verification === 'pending') {
-          setEmailVerified(true);
-          setDocsUploaded(true);
-          setStep('payment');
-        } else if (data.verification === 'docs') {
-          setEmailVerified(true);
-          setStep('docs');
-        } else {
-          // Check if email is already verified from emailVerifications
-          // The verification field stores overall status; email might already be done
-          setStep('email');
-        }
+        // Hydrate independent flags from server
+        setEmailVerified(!!data.emailVerified);
+        setPhoneVerified(!!data.phoneVerified);
+        setDocsUploaded(!!data.docsUploaded);
+        setPaymentVerified(!!data.paymentVerified);
       })
       .catch(() => setError('Failed to load verification data'))
       .finally(() => setLoading(false));
@@ -134,16 +197,57 @@ export default function Verification() {
     if (!email && user?.email) setEmail(user.email);
   }, [email, user]);
 
-  const parsedCrypto = (() => {
-    if (!verificationData) return null;
-    const raw = verificationData.cryptoAmounts;
-    if (typeof raw === 'string') {
-      try { return JSON.parse(raw) as CryptoAmounts; } catch { return null; }
-    }
-    return raw;
-  })();
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
 
-  // ── Step 1 handlers ──
+    const loadAddressBook = async () => {
+      setAddressLoading(true);
+      try {
+        const settings = await api.post<AccountSettingsResponse>('/api/account/settings', { email: user.email });
+        if (cancelled) return;
+
+        const parsed = parseCryptoAddressBook(settings.cryptoAddresses);
+        setAddressBook(parsed);
+
+        const hasAnySavedAddress = Object.values(parsed).some((list) => list.length > 0);
+        if (!hasAnySavedAddress) {
+          setShowMissingAddressModal(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setError('Could not load your saved wallet addresses. Please retry or update Account Settings > Crypto.');
+        }
+      } finally {
+        if (!cancelled) setAddressLoading(false);
+      }
+    };
+
+    loadAddressBook();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (!walletOptions.length) {
+      setWalletAddress('');
+      return;
+    }
+
+    if (!walletOptions.includes(walletAddress)) {
+      setWalletAddress(walletOptions[0]);
+    }
+  }, [chain, walletAddress, walletOptions]);
+
+  const redirectToCryptoSettings = useCallback(() => {
+    if (redirectingToSettings) return;
+    setRedirectingToSettings(true);
+    setShowMissingAddressModal(false);
+    navigate('/account/settings?section=Crypto');
+  }, [navigate, redirectingToSettings]);
+
   const handleVerifyEmail = useCallback(async (overrideEmail?: string, overrideCode?: string) => {
     const emailVal = (overrideEmail ?? email).trim();
     const codeVal = (overrideCode ?? verificationCode).trim();
@@ -163,8 +267,6 @@ export default function Verification() {
         setEmailStatus('Email verified!');
         setEmailStatusType('success');
         if (user) await refreshUser();
-        // Auto-advance after a short delay
-        window.setTimeout(() => setStep('docs'), 1000);
       } else {
         setEmailStatus(r.message || 'Verification failed.');
         setEmailStatusType('error');
@@ -177,14 +279,13 @@ export default function Verification() {
     }
   }, [email, verificationCode, refreshUser, user]);
 
-  // Auto-verify from URL params
   useEffect(() => {
     if (autoVerifyAttempted || emailVerified || !emailFromUrl || !codeFromUrl || loading) return;
     setAutoVerifyAttempted(true);
     void handleVerifyEmail(emailFromUrl, codeFromUrl);
   }, [autoVerifyAttempted, codeFromUrl, emailFromUrl, handleVerifyEmail, emailVerified, loading]);
 
-  const handleResendCode = async () => {
+  const handleResendCode = useCallback(async () => {
     const emailVal = email.trim();
     if (!emailVal || !validateEmail(emailVal)) { setEmailStatus('Please enter a valid email.'); setEmailStatusType('error'); return; }
     setEmailSending(true);
@@ -201,9 +302,51 @@ export default function Verification() {
     } finally {
       setEmailSending(false);
     }
-  };
+  }, [email]);
 
-  // ── Step 2 handler ──
+  const parsedCrypto = (() => {
+    if (!verificationData) return null;
+    const raw = verificationData.cryptoAmounts;
+    if (typeof raw === 'string') {
+      try { return JSON.parse(raw) as CryptoAmounts; } catch { return null; }
+    }
+    return raw;
+  })();
+
+  // ── Phone handlers ──
+  const sendOtp = useCallback(async () => {
+    if (!phone.trim()) { setSmsStatus('Enter a phone number.'); setSmsStatusType('error'); return; }
+    setSmsBusy(true);
+    setSmsStatus('Sending code...'); setSmsStatusType('info');
+    try {
+      await api.post('/api/account/phone/send-otp', { phoneNumber: phone.trim() });
+      setOtpSent(true);
+      setSmsStatus('Code sent. Check your messages.'); setSmsStatusType('success');
+    } catch (e) {
+      setSmsStatus(e instanceof ApiError ? e.message : 'Could not send code.'); setSmsStatusType('error');
+    } finally {
+      setSmsBusy(false);
+    }
+  }, [phone, user]);
+
+  const verifyOtp = useCallback(async () => {
+    if (otp.length !== 6) { setSmsStatus('Enter the 6-digit code.'); setSmsStatusType('error'); return; }
+    setSmsBusy(true);
+    setSmsStatus('Verifying...'); setSmsStatusType('info');
+    try {
+      await api.post('/api/account/phone/verify-otp', { phoneNumber: phone.trim(), code: otp });
+      setPhoneVerified(true);
+      setOtpSent(false);
+      setSmsStatus('Phone verified!'); setSmsStatusType('success');
+      if (user) await refreshUser();
+    } catch (e) {
+      setSmsStatus(e instanceof ApiError ? e.message : 'Invalid code.'); setSmsStatusType('error');
+    } finally {
+      setSmsBusy(false);
+    }
+  }, [otp, phone, user, refreshUser]);
+
+  // ── Doc handler ──
   const handleUploadDocs = async () => {
     if (!facePic || !idPhoto || !user) return;
     setUploading(true);
@@ -215,7 +358,6 @@ export default function Verification() {
       await api.upload('/api/auth/verification-docs/' + encodeURIComponent(user.username), form);
       setDocsUploaded(true);
       await refreshUser();
-      window.setTimeout(() => setStep('payment'), 600);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
@@ -223,7 +365,7 @@ export default function Verification() {
     }
   };
 
-  // ── Step 3 handlers ──
+  // ── Payment handlers ──
   const handleCopy = () => {
     navigator.clipboard.writeText(currency.address).then(() => {
       setCopied(true);
@@ -244,7 +386,7 @@ export default function Verification() {
         transactionId: txHash.trim(),
         transactionId2: txHash2.trim(),
       });
-      setStep('done');
+      setPaymentVerified(true);
       await refreshUser();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Verification failed — amounts may not match');
@@ -253,7 +395,6 @@ export default function Verification() {
     }
   };
 
-  // ── Helpers ──
   const statusStyles = {
     success: 'bg-green-500/10 border-green-500/30 text-green-400',
     error: 'bg-danger/10 border-danger/30 text-danger',
@@ -261,7 +402,10 @@ export default function Verification() {
     '': 'hidden',
   } as const;
 
-  const stepNumber = step === 'email' ? 1 : step === 'docs' ? 2 : step === 'payment' ? 3 : 3;
+  const isDone = (id: TaskId) =>
+    id === 'email' ? emailVerified : id === 'phone' ? phoneVerified : id === 'docs' ? docsUploaded : paymentVerified;
+
+  const completedCount = [emailVerified, phoneVerified, docsUploaded, paymentVerified].filter(Boolean).length;
 
   // ── Loading ──
   if (loading) {
@@ -272,13 +416,13 @@ export default function Verification() {
     );
   }
 
-  // ── Done ──
-  if (step === 'done') {
+  // ── All complete ──
+  if (allDone) {
     return (
       <div className="max-w-lg mx-auto py-20 text-center space-y-4">
         <ShieldCheck className="w-16 h-16 text-green-500 mx-auto" />
         <h1 className="text-2xl font-bold text-text">Account Verified</h1>
-        <p className="text-text-muted text-sm">Your identity has been fully confirmed. You can now redeem credits.</p>
+        <p className="text-text-muted text-sm">Your identity has been fully confirmed. </p>
         <Link to="/account" className="inline-block mt-4 px-6 py-2.5 rounded-xl bg-brand text-white text-sm font-bold hover:bg-brand-dark transition-colors no-underline">
           Back to Account
         </Link>
@@ -286,7 +430,6 @@ export default function Verification() {
     );
   }
 
-  // ── Main layout ──
   return (
     <div className="max-w-2xl mx-auto py-6 px-4">
       <Link to="/account" className="inline-flex items-center gap-1 text-sm text-text-muted hover:text-text transition no-underline mb-6">
@@ -299,31 +442,30 @@ export default function Verification() {
         Account Verification
       </h1>
       <p className="text-sm text-text-muted mb-8">
-        Complete three steps to verify your account and unlock credit redemption.
+        Complete the steps below in any order to verify your account and unlock credit redemption.
       </p>
 
-      {/* ── Progress Steps ── */}
+      {/* ── Task switcher (tabs, not a forced sequence) ── */}
       <div className="flex items-center gap-2 mb-8">
-        <div className={`flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium ${
-          step === 'email' ? 'bg-brand text-white' : emailVerified ? 'bg-green-500/20 text-green-500' : 'bg-surface-2 text-text-muted'
-        }`}>
-          {emailVerified ? <CheckCircle className="w-3.5 h-3.5" /> : <Mail className="w-3.5 h-3.5" />}
-          1. Email
-        </div>
-        <div className="flex-1 h-px bg-surface-3" />
-        <div className={`flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium ${
-          step === 'docs' ? 'bg-brand text-white' : docsUploaded ? 'bg-green-500/20 text-green-500' : 'bg-surface-2 text-text-muted'
-        }`}>
-          {docsUploaded ? <CheckCircle className="w-3.5 h-3.5" /> : <Camera className="w-3.5 h-3.5" />}
-          2. Upload ID
-        </div>
-        <div className="flex-1 h-px bg-surface-3" />
-        <div className={`flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium ${
-          step === 'payment' ? 'bg-brand text-white' : 'bg-surface-2 text-text-muted'
-        }`}>
-          <CreditCard className="w-3.5 h-3.5" />
-          3. Crypto
-        </div>
+        {TASKS.map((t) => {
+          const done = isDone(t.id);
+          const isActive = active === t.id;
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setActive(t.id)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium transition-colors ${
+                isActive ? 'bg-brand text-white'
+                  : done ? 'bg-green-500/20 text-green-500 hover:bg-green-500/30'
+                  : 'bg-surface-2 text-text-muted hover:text-text'
+              }`}
+            >
+              {done ? <CheckCircle className="w-3.5 h-3.5" /> : <Icon className="w-3.5 h-3.5" />}
+              {t.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* ── Global error ── */}
@@ -334,13 +476,16 @@ export default function Verification() {
         </div>
       )}
 
-      {/* ━━━ STEP 1 — Email Verification ━━━ */}
-      {step === 'email' && (
+      {/* ━━━ TASK — Email verification ━━━ */}
+      {active === 'email' && (
         <div className="bg-surface-2 rounded-2xl p-6 space-y-4">
           <div>
-            <h3 className="text-text font-semibold mb-1">Verify Your Email</h3>
+            <h3 className="text-text font-semibold mb-1 flex items-center gap-2">
+              Verify Your Email
+              {emailVerified && <CheckCircle className="w-4 h-4 text-green-500" />}
+            </h3>
             <p className="text-xs text-text-muted">
-              Enter the code we sent to your email. If you didn't receive one, click Resend.
+              Enter the verification code sent to your inbox.
             </p>
           </div>
 
@@ -359,8 +504,8 @@ export default function Verification() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              disabled={emailVerifying || emailVerified}
-              placeholder="you@email.com"
+              disabled={emailVerified || emailVerifying}
+              placeholder="you@example.com"
               className="w-full bg-surface-3 border border-surface-3 rounded-xl px-4 py-2.5 text-sm text-text focus:outline-none focus:border-brand disabled:opacity-70"
             />
           </div>
@@ -371,39 +516,123 @@ export default function Verification() {
               type="text"
               value={verificationCode}
               onChange={(e) => setVerificationCode(e.target.value.trim())}
-              disabled={emailVerifying || emailVerified}
+              disabled={emailVerified || emailVerifying}
               placeholder="Enter the code from your email"
+              className="w-full bg-surface-3 border border-surface-3 rounded-xl px-4 py-2.5 text-sm text-text font-mono focus:outline-none focus:border-brand disabled:opacity-70"
+            />
+          </div>
+
+          {!emailVerified && (
+            <button
+              type="button"
+              onClick={() => void handleVerifyEmail()}
+              disabled={emailVerifying}
+              className="w-full py-3 rounded-xl bg-brand text-white font-bold text-sm hover:bg-brand-dark transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
+            >
+              {emailVerifying ? <><Loader2 className="w-4 h-4 animate-spin" /> Verifying...</> : <><Mail className="w-4 h-4" /> Verify Email</>}
+            </button>
+          )}
+
+          {!emailVerified && (
+            <button
+              type="button"
+              onClick={() => void handleResendCode()}
+              disabled={emailSending || emailVerifying}
+              className="w-full py-2.5 rounded-xl bg-surface-3 text-text font-medium text-sm hover:bg-surface transition-colors disabled:opacity-50"
+            >
+              {emailSending ? 'Sending...' : 'Resend Code'}
+            </button>
+          )}
+
+          {emailVerified && (
+            <div className="flex items-center gap-2 text-green-500 text-sm">
+              <Check className="w-4 h-4" /> Email verified.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ━━━ TASK — Phone / SMS verification ━━━ */}
+      {active === 'phone' && (
+        <div className="bg-surface-2 rounded-2xl p-6 space-y-4">
+          <div>
+            <h3 className="text-text font-semibold mb-1 flex items-center gap-2">
+              Verify Your Phone
+              {phoneVerified && <CheckCircle className="w-4 h-4 text-green-500" />}
+            </h3>
+            <p className="text-xs text-text-muted">
+              We'll send a one-time code by SMS to confirm your number.
+            </p>
+          </div>
+
+          {smsStatus && (
+            <div className={`border rounded-xl px-3 py-2.5 text-sm flex items-start gap-2 ${statusStyles[smsStatusType]}`}>
+              {smsStatusType === 'success' ? <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" />
+                : smsStatusType === 'error' ? <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                : <Loader2 className="w-4 h-4 mt-0.5 shrink-0 animate-spin" />}
+              <span>{smsStatus}</span>
+            </div>
+          )}
+
+          <div>
+            <label className="text-sm text-text-muted block mb-1">Phone Number</label>
+            <input
+              type="tel"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              disabled={phoneVerified}
+              placeholder="+1 555 123 4567"
               className="w-full bg-surface-3 border border-surface-3 rounded-xl px-4 py-2.5 text-sm text-text focus:outline-none focus:border-brand disabled:opacity-70"
             />
           </div>
 
-          <button
-            type="button"
-            onClick={() => void handleVerifyEmail()}
-            disabled={emailVerifying || emailVerified}
-            className="w-full py-3 rounded-xl bg-brand text-white font-bold text-sm hover:bg-brand-dark transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
-          >
-            {emailVerifying ? <><Loader2 className="w-4 h-4 animate-spin" /> Verifying...</> : emailVerified ? <><CheckCircle className="w-4 h-4" /> Verified</> : 'Verify Email'}
-          </button>
+          {otpSent && !phoneVerified && (
+            <div>
+              <label className="text-sm text-text-muted block mb-1">Verification Code</label>
+              <input
+                type="text" inputMode="numeric" maxLength={6} value={otp}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+                placeholder="000000"
+                className="w-full bg-surface-3 border border-surface-3 rounded-xl px-4 py-3 text-lg text-center tracking-widest text-text font-mono focus:outline-none focus:border-brand"
+              />
+            </div>
+          )}
 
-          <button
-            type="button"
-            onClick={() => void handleResendCode()}
-            disabled={emailSending || emailVerifying || emailVerified}
-            className="w-full py-2.5 rounded-xl bg-surface-3 text-text font-medium text-sm hover:bg-surface transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
-          >
-            {emailSending ? <><Loader2 className="w-4 h-4 animate-spin" /> Sending...</> : <><RefreshCcw className="w-4 h-4" /> Resend Code</>}
-          </button>
+          {!phoneVerified && (
+            <button
+              type="button"
+              onClick={() => (otpSent ? void verifyOtp() : void sendOtp())}
+              disabled={smsBusy}
+              className="w-full py-3 rounded-xl bg-brand text-white font-bold text-sm hover:bg-brand-dark transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
+            >
+              {smsBusy ? <><Loader2 className="w-4 h-4 animate-spin" /> Working...</>
+                : otpSent ? 'Verify Code' : <><Smartphone className="w-4 h-4" /> Send Code</>}
+            </button>
+          )}
 
-          <p className="text-xs text-text-muted text-center">Check your inbox and spam folder.</p>
+          {otpSent && !phoneVerified && (
+            <button type="button" onClick={() => void sendOtp()} disabled={smsBusy}
+              className="w-full py-2.5 rounded-xl bg-surface-3 text-text font-medium text-sm hover:bg-surface transition-colors disabled:opacity-50">
+              Resend Code
+            </button>
+          )}
+
+          {phoneVerified && (
+            <div className="flex items-center gap-2 text-green-500 text-sm">
+              <Check className="w-4 h-4" /> Phone number verified.
+            </div>
+          )}
         </div>
       )}
 
-      {/* ━━━ STEP 2 — Document Upload ━━━ */}
-      {step === 'docs' && (
+      {/* ━━━ TASK — Document Upload ━━━ */}
+      {active === 'docs' && (
         <div className="bg-surface-2 rounded-2xl p-6 space-y-6">
           <div>
-            <h3 className="text-text font-semibold mb-1">Upload Identification</h3>
+            <h3 className="text-text font-semibold mb-1 flex items-center gap-2">
+              Upload Identification
+              {docsUploaded && <CheckCircle className="w-4 h-4 text-green-500" />}
+            </h3>
             <p className="text-xs text-text-muted">
               Upload a clear face photo and a government-issued ID. Files are stored temporarily and
               deleted immediately after manual review.
@@ -462,21 +691,26 @@ export default function Verification() {
 
           <button
             onClick={handleUploadDocs}
-            disabled={!facePic || !idPhoto || uploading}
+            disabled={!facePic || !idPhoto || uploading || docsUploaded}
             className="w-full py-3 rounded-xl bg-brand text-white font-bold text-sm hover:bg-brand-dark transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
           >
-            {uploading ? <><Loader2 className="w-4 h-4 animate-spin" /> Uploading…</> : <><Upload className="w-4 h-4" /> Upload Documents</>}
+            {uploading ? <><Loader2 className="w-4 h-4 animate-spin" /> Uploading…</>
+              : docsUploaded ? <><CheckCircle className="w-4 h-4" /> Uploaded</>
+              : <><Upload className="w-4 h-4" /> Upload Documents</>}
           </button>
         </div>
       )}
 
-      {/* ━━━ STEP 3 — Crypto Micropayment ━━━ */}
-      {step === 'payment' && (
+      {/* ━━━ TASK — Crypto Micropayment ━━━ */}
+      {active === 'payment' && (
         <div className="bg-surface-2 rounded-2xl p-6 space-y-6">
           <div>
-            <h3 className="text-text font-semibold mb-1">Micro-Payment Verification</h3>
+            <h3 className="text-text font-semibold mb-1 flex items-center gap-2">
+              Micro-Payment Verification
+              {paymentVerified && <CheckCircle className="w-4 h-4 text-green-500" />}
+            </h3>
             <p className="text-xs text-text-muted">
-              Send <strong>two</strong> small transactions (each under $0.20) to the IotaChat address below. The exact amounts
+              Send <strong>two</strong> small transactions (each under $0.20) to the Drauwper address below. The exact amounts
               must match to verify your identity.
             </p>
           </div>
@@ -567,13 +801,22 @@ export default function Verification() {
           {/* User's wallet address */}
           <div>
             <label className="text-sm text-text-muted block mb-1">Your {CHAIN_LABELS[chain]} Wallet Address</label>
-            <input
-              type="text"
+            <select
               value={walletAddress}
               onChange={(e) => setWalletAddress(e.target.value)}
-              placeholder={`Enter your ${chain} address`}
+              disabled={addressLoading || walletOptions.length === 0 || redirectingToSettings}
               className="w-full bg-surface-3 border border-surface-3 rounded-xl px-4 py-2.5 text-sm text-text font-mono focus:outline-none focus:border-brand"
-            />
+            >
+              <option value="">Select your saved {chain} wallet</option>
+              {walletOptions.map((addr) => (
+                <option key={addr} value={addr}>{addr}</option>
+              ))}
+            </select>
+            {walletOptions.length === 0 && !addressLoading && (
+              <p className="text-xs text-amber-400 mt-1">
+                No saved {chain} wallet found. Add one in Account Settings &gt; Crypto.
+              </p>
+            )}
           </div>
 
           {/* Transaction hash 1 */}
@@ -602,16 +845,51 @@ export default function Verification() {
 
           <button
             onClick={handleVerifyPayment}
-            disabled={!walletAddress.trim() || !txHash.trim() || !txHash2.trim() || verifying}
+            disabled={!walletAddress.trim() || !txHash.trim() || !txHash2.trim() || verifying || paymentVerified || addressLoading || redirectingToSettings}
             className="w-full py-3 rounded-xl bg-brand text-white font-bold text-sm hover:bg-brand-dark transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
           >
-            {verifying ? <><Loader2 className="w-4 h-4 animate-spin" /> Verifying…</> : <><ShieldCheck className="w-4 h-4" /> Verify Account</>}
+            {verifying ? <><Loader2 className="w-4 h-4 animate-spin" /> Verifying…</>
+              : paymentVerified ? <><CheckCircle className="w-4 h-4" /> Verified</>
+              : <><ShieldCheck className="w-4 h-4" /> Submit Payment Proof</>}
           </button>
         </div>
       )}
 
-      {/* Step indicator bottom */}
-      <p className="text-xs text-text-muted text-center mt-6">Step {stepNumber} of 3</p>
+      {showMissingAddressModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={redirectToCryptoSettings}
+        >
+          <div
+            className="w-full max-w-md bg-surface-2 border border-amber-400/40 rounded-2xl p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-bold text-text">Wallet Setup Required</h2>
+            <p className="text-sm text-text-muted mt-2">
+              To continue micro-payment verification, register at least one crypto wallet address in Account Settings under the Crypto section.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={redirectToCryptoSettings}
+                className="px-4 py-2 rounded-lg bg-brand text-white font-semibold text-sm hover:bg-brand-dark transition-colors"
+              >
+                OK
+              </button>
+              <button
+                type="button"
+                onClick={redirectToCryptoSettings}
+                className="px-4 py-2 rounded-lg bg-surface-3 text-text-muted text-sm hover:text-text transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Progress footer */}
+      <p className="text-xs text-text-muted text-center mt-6">{completedCount} of 4 steps complete</p>
     </div>
   );
 }

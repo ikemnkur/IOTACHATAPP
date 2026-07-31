@@ -1,8 +1,81 @@
 import { Link } from 'react-router-dom';
-import { Flame, Clock, Users, Package, CreditCard, TrendingUp, PlusCircle, Zap, ArrowRight } from 'lucide-react';
+import { Flame, Clock, Users, Package, TrendingUp, PlusCircle, Zap, ArrowRight } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { useDashboard } from '../hooks/useData';
+import { useDashboard, useEarningsHistory } from '../hooks/useData';
 import type { Drop } from '../types';
+
+
+const API_BASE = import.meta.env.VITE_API_URL || '';
+const PUBLIC_MEDIA_BASE = String(
+  import.meta.env.VITE_STORAGE_PUBLIC_BASE_URL
+  || import.meta.env.VITE_MEDIA_BASE_URL
+  || import.meta.env.VITE_R2_PUBLIC_BASE_URL
+  || ''
+).replace(/\/$/, '');
+
+function resolveDropThumbnailUrl(raw: string | null | undefined, dropId: string): string {
+  const value = String(raw || '').trim();
+  if (!value) return `https://picsum.photos/seed/${dropId}/400/200`;
+
+  // Legacy API URLs from R2 S3 endpoint are not browser-public; rewrite to configured public base.
+  if (/^https?:\/\//i.test(value)) {
+    if (PUBLIC_MEDIA_BASE) {
+      try {
+        const parsed = new URL(value);
+        const pathNoLead = parsed.pathname.replace(/^\/+/, '');
+        const pathParts = pathNoLead.split('/');
+
+        // /<bucket>/<objectKey...>
+        if (parsed.hostname.endsWith('.r2.cloudflarestorage.com') && pathParts.length > 1) {
+          const objectPath = pathParts.slice(1).join('/');
+          return `${PUBLIC_MEDIA_BASE}/${encodeURI(objectPath)}`;
+        }
+      } catch {
+        // Fall through to return original URL.
+      }
+    }
+    return value;
+  }
+
+  // Storage object key (e.g. storage_folder/public/thumbnails/...) => public media domain.
+  if (PUBLIC_MEDIA_BASE && !value.startsWith('/')) {
+    return `${PUBLIC_MEDIA_BASE}/${encodeURI(value.replace(/^\/+/, ''))}`;
+  }
+
+  // Local/static path fallback.
+  if (value.startsWith('/')) {
+    return API_BASE ? `${API_BASE}${value}` : value;
+  }
+
+  return `https://picsum.photos/seed/${dropId}/400/200`;
+}
+
+type DashboardView = 'posts' | 'credits' | 'engagement';
+
+function MetricRow({
+  label,
+  current,
+  day = '--',
+  week = '--',
+  month = '--',
+}: {
+  label: string;
+  current: string | number;
+  day?: string | number;
+  week?: string | number;
+  month?: string | number;
+}) {
+  return (
+    <tr className="border-t border-surface-3/80">
+      <td className="py-3 pr-3 text-sm text-text-muted">{label}</td>
+      <td className="py-3 pr-3 text-right text-sm font-semibold text-text">{current}</td>
+      <td className="py-3 pr-3 text-right text-xs font-medium text-text-muted">{day}</td>
+      <td className="py-3 pr-3 text-right text-xs font-medium text-text-muted">{week}</td>
+      <td className="py-3 text-right text-xs font-medium text-text-muted">{month}</td>
+    </tr>
+  );
+}
 
 function StatusBadge({ status }: { status: Drop['status'] }) {
   const styles: Record<Drop['status'], string> = {
@@ -11,7 +84,9 @@ function StatusBadge({ status }: { status: Drop['status'] }) {
     dropped: 'bg-success/15 text-success',
     expired: 'bg-danger/15 text-danger',
     removed: 'bg-text-muted/10 text-text-muted line-through',
-    draft: 'bg-text-muted/10 text-text-muted'
+    draft: 'bg-text-muted/10 text-text-muted',
+    hidden: 'bg-slate-500/15 text-slate-300',
+    boosted: 'bg-brand/20 text-brand'
   };
   return (
     <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${styles[status]}`}>
@@ -23,6 +98,59 @@ function StatusBadge({ status }: { status: Drop['status'] }) {
 export default function Dashboard() {
   const { user } = useAuth();
   const { data, loading, error } = useDashboard();
+  const { entries: earningsEntries, totalEarned: earningsTotalEarned } = useEarningsHistory();
+  const [view, setView] = useState<DashboardView>('posts');
+  const releasedDrops = (data?.myDrops || []).filter((drop) => drop.status === 'dropped' || drop.status === 'expired');
+
+  const earningsSummary = useMemo(() => {
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const weekMs = 7 * dayMs;
+    const monthMs = 30 * dayMs;
+
+    let day = 0;
+    let week = 0;
+    let month = 0;
+
+    for (const entry of earningsEntries) {
+      const ageMs = now - entry.timestamp;
+      if (ageMs <= dayMs) day += entry.amount;
+      if (ageMs <= weekMs) week += entry.amount;
+      if (ageMs <= monthMs) month += entry.amount;
+    }
+
+    return { day, week, month };
+  }, [earningsEntries]);
+
+  const engagementSummary = useMemo(() => {
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const weekMs = 7 * dayMs;
+    const monthMs = 30 * dayMs;
+
+    const inWindow = (windowMs: number) => releasedDrops.filter((drop) => {
+      const releasedAt = drop.actualDropTime ?? drop.createdAt;
+      return releasedAt != null && now - releasedAt <= windowMs;
+    });
+
+    const summarize = (drops: Drop[]) => {
+      const likes = drops.reduce((sum, drop) => sum + (drop.likeCount || 0), 0);
+      const dislikes = drops.reduce((sum, drop) => sum + (drop.dislikeCount || 0), 0);
+      const comments = drops.reduce((sum, drop) => sum + (drop.reviewCount || 0), 0);
+      const rated = drops.filter((drop) => drop.avgRating != null);
+      const avgQuality = rated.length
+        ? rated.reduce((sum, drop) => sum + Number(drop.avgRating || 0), 0) / rated.length
+        : null;
+      return { likes, dislikes, comments, avgQuality };
+    };
+
+    return {
+      current: summarize(releasedDrops),
+      day: summarize(inWindow(dayMs)),
+      week: summarize(inWindow(weekMs)),
+      month: summarize(inWindow(monthMs)),
+    };
+  }, [releasedDrops]);
 
   if (loading) {
     return (
@@ -39,6 +167,11 @@ export default function Dashboard() {
   const { myDrops, contributed: contributedDrops, stats } = data;
   const myActiveDrops = myDrops.filter((d) => d.status === 'active' || d.status === 'pending');
   const myPastDrops = myDrops.filter((d) => d.status === 'dropped' || d.status === 'expired');
+  const activeCount = myDrops.filter((d) => d.status === 'active').length;
+  const expiredCount = myDrops.filter((d) => d.status === 'expired').length;
+  const droppedCount = myDrops.filter((d) => d.status === 'dropped').length;
+
+  
 
   return (
     <div className="space-y-8">
@@ -60,31 +193,155 @@ export default function Dashboard() {
         </Link>
       </div>
 
-      {/* Quick Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="bg-surface-2 rounded-xl p-4 text-center">
-          <Package className="w-5 h-5 mx-auto mb-1 text-brand" />
-          <p className="text-2xl font-bold text-text">{stats.totalMyDrops}</p>
-          <p className="text-xs text-text-muted">My Drops</p>
-        </div>
-        <div className="bg-surface-2 rounded-xl p-4 text-center">
-          <Zap className="w-5 h-5 mx-auto mb-1 text-brand" />
-          <p className="text-2xl font-bold text-text">{stats.dropsContributedTo}</p>
-          <p className="text-xs text-text-muted">Contributing To</p>
-        </div>
-        <div className="bg-surface-2 rounded-xl p-4 text-center">
-          <CreditCard className="w-5 h-5 mx-auto mb-1 text-green-500" />
-          {/* <p className="text-2xl font-bold text-text">{(stats.totalEarned / 1000).toFixed(0)}K</p> */}
-          <p className="text-2xl font-bold text-text">{(stats.totalEarned)}</p>
-          <p className="text-xs text-text-muted">Credits Earned</p>
-        </div>
-        <div className="bg-surface-2 rounded-xl p-4 text-center">
-          <Flame className="w-5 h-5 mx-auto mb-1 text-red-400" />
-          {/* <p className="text-2xl font-bold text-text">{(stats.totalContributed / 1000).toFixed(0)}K</p> */}
-            <p className="text-2xl font-bold text-text">{(stats.totalContributed)}</p>
-          <p className="text-xs text-text-muted">Credits Burned</p>
-        </div>
+      <div className="flex items-center justify-start gap-2 rounded-xl border border-surface-3 bg-surface-2/70 p-1.5 overflow-x-auto">
+        {([
+              { id: 'posts', label: 'Drops' },
+          { id: 'credits', label: 'Credits' },
+          { id: 'engagement', label: 'Engagement' },
+        ] as const).map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setView(item.id)}
+            className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${view === item.id ? 'bg-brand text-white shadow-sm' : 'text-text-muted hover:bg-surface-3 hover:text-text'}`}
+          >
+            {item.label}
+          </button>
+        ))}
       </div>
+
+      {view === 'posts' && (
+        <div className="rounded-2xl border border-surface-3 bg-surface-2/70 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-text">Drops</h2>
+              <p className="text-xs text-text-muted">Compact drop activity summary</p>
+            </div>
+            <div className="text-right text-xs text-text-muted">
+              <p className="font-semibold text-text">{stats.totalMyDrops} total</p>
+              <p>{activeCount} active</p>
+            </div>
+          </div>
+          <table className="w-full table-fixed">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-wide text-text-muted">
+                <th className="pb-2 text-left font-medium">Metric</th>
+                <th className="pb-2 text-right font-medium">Current</th>
+                <th className="pb-2 text-right font-medium">Day</th>
+                <th className="pb-2 text-right font-medium">Week</th>
+                <th className="pb-2 text-right font-medium">Month</th>
+              </tr>
+            </thead>
+            <tbody>
+              <MetricRow label="Total Drops" current={stats.totalMyDrops.toLocaleString()} />
+              <MetricRow label="Active" current={activeCount.toLocaleString()} />
+              <MetricRow label="Expired" current={expiredCount.toLocaleString()} />
+              <MetricRow label="Dropped" current={droppedCount.toLocaleString()} />
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {view === 'credits' && (
+        <div className="rounded-2xl border border-surface-3 bg-surface-2/70 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-text">Credits</h2>
+              <p className="text-xs text-text-muted">Balance, spending, and earnings</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <Link to="/buy-credits" className="text-xs font-medium text-brand hover:underline no-underline">
+                Buy credits
+              </Link>
+              <Link to="/history" className="text-xs font-medium text-brand hover:underline no-underline">
+                Credit History
+              </Link>
+            </div>
+          </div>
+          <table className="w-full table-fixed">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-wide text-text-muted">
+                <th className="pb-2 text-left font-medium">Metric</th>
+                <th className="pb-2 text-right font-medium">Current</th>
+                <th className="pb-2 text-right font-medium">Day</th>
+                <th className="pb-2 text-right font-medium">Week</th>
+                <th className="pb-2 text-right font-medium">Month</th>
+              </tr>
+            </thead>
+            <tbody>
+              <MetricRow label="Available" current={(user?.creditBalance ?? 0).toLocaleString()} />
+              <MetricRow
+                label="Earned (Lifetime)"
+                current={earningsTotalEarned.toLocaleString()}
+                day={earningsSummary.day.toLocaleString()}
+                week={earningsSummary.week.toLocaleString()}
+                month={earningsSummary.month.toLocaleString()}
+              />
+              <MetricRow label="Burned (Lifetime)" current={stats.totalContributed.toLocaleString()} />
+              <MetricRow label="Promo/Ad Campaign Spend" current="--" />
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {view === 'engagement' && (
+        <div className="rounded-2xl border border-surface-3 bg-surface-2/70 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-text">Engagement</h2>
+              <p className="text-xs text-text-muted">Interaction totals and quality score</p>
+            </div>
+          </div>
+          <table className="w-full table-fixed">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-wide text-text-muted">
+                <th className="pb-2 text-left font-medium">Metric</th>
+                <th className="pb-2 text-right font-medium">Current</th>
+                <th className="pb-2 text-right font-medium">Day</th>
+                <th className="pb-2 text-right font-medium">Week</th>
+                <th className="pb-2 text-right font-medium">Month</th>
+              </tr>
+            </thead>
+            <tbody>
+              <MetricRow
+                label="Likes"
+                current={engagementSummary.current.likes.toLocaleString()}
+                day={engagementSummary.day.likes.toLocaleString()}
+                week={engagementSummary.week.likes.toLocaleString()}
+                month={engagementSummary.month.likes.toLocaleString()}
+              />
+              <MetricRow
+                label="Dislikes"
+                current={engagementSummary.current.dislikes.toLocaleString()}
+                day={engagementSummary.day.dislikes.toLocaleString()}
+                week={engagementSummary.week.dislikes.toLocaleString()}
+                month={engagementSummary.month.dislikes.toLocaleString()}
+              />
+              <MetricRow
+                label="Comments"
+                current={engagementSummary.current.comments.toLocaleString()}
+                day={engagementSummary.day.comments.toLocaleString()}
+                week={engagementSummary.week.comments.toLocaleString()}
+                month={engagementSummary.month.comments.toLocaleString()}
+              />
+              <MetricRow
+                label="Favorites"
+                current={stats.totalFavorites.toLocaleString()}
+                day={stats.totalFavorites.toLocaleString()}
+                week={stats.totalFavorites.toLocaleString()}
+                month={stats.totalFavorites.toLocaleString()}
+              />
+              <MetricRow
+                label="Avg Quality Score"
+                current={engagementSummary.current.avgQuality == null ? '--' : `${engagementSummary.current.avgQuality.toFixed(1)}%`}
+                day={engagementSummary.day.avgQuality == null ? '0.0%' : `${engagementSummary.day.avgQuality.toFixed(1)}%`}
+                week={engagementSummary.week.avgQuality == null ? '0.0%' : `${engagementSummary.week.avgQuality.toFixed(1)}%`}
+                month={engagementSummary.month.avgQuality == null ? '0.0%' : `${engagementSummary.month.avgQuality.toFixed(1)}%`}
+              />
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Active Drops I'm Hosting */}
       <section>
@@ -105,7 +362,11 @@ export default function Dashboard() {
         ) : (
           <div className="space-y-3">
             {myActiveDrops.map((drop) => (
-              <MyDropRow key={drop.id} drop={drop} />
+              <>
+               <MyDropRow key={drop.id} drop={drop} />
+             
+              </>
+             
             ))}
           </div>
         )}
@@ -138,6 +399,8 @@ export default function Dashboard() {
               const mins = Math.floor((remaining % 3600) / 60);
               const goalPct = Math.min((drop.currentContributions / drop.goalAmount) * 100, 100);
 
+              console.log('drop:', drop);
+
               return (
                 <Link
                   key={drop.id}
@@ -147,7 +410,7 @@ export default function Dashboard() {
                   <div className="w-11 h-11 bg-surface-3 rounded-lg flex items-center justify-center overflow-hidden shrink-0">
                     <img
                       // src={`https://picsum.photos/seed/${drop.id}/88/88`}
-                       src={drop.thumbnailUrl || `https://picsum.photos/seed/${drop.id}/400/200`}
+                      src={resolveDropThumbnailUrl(drop.thumbnailUrl, drop.id)}
                       alt={drop.title}
                       className="w-full h-full object-cover"
                     />
@@ -222,18 +485,20 @@ function MyDropRow({ drop }: { drop: Drop }) {
   const linkTo = drop.status === 'dropped' ? `/drop/${drop.id}/download` : `/drop/${drop.id}`;
 
   return (
-    <Link
-      to={linkTo}
-      className="bg-surface-2 rounded-xl p-4 flex items-center gap-4 hover:bg-surface-3 transition block no-underline group"
-    >
+    <div className="relative bg-surface-2 rounded-xl p-4 flex items-center gap-4 hover:bg-surface-3 transition group">
+      <Link
+        to={linkTo}
+        className="absolute inset-0 z-0 rounded-xl"
+        aria-label={`Open ${drop.title}`}
+      />
       <div className="w-11 h-11 bg-surface-3 rounded-lg flex items-center justify-center overflow-hidden shrink-0">
         <img
-          src={`https://picsum.photos/seed/${drop.id}/88/88`}
+          src={resolveDropThumbnailUrl(drop.thumbnailUrl, drop.id)}
           alt={drop.title}
           className="w-full h-full object-cover"
         />
       </div>
-      <div className="flex-1 min-w-0">
+      <div className="relative z-10 flex-1 min-w-0 pointer-events-none">
         <div className="flex items-center gap-2">
           <p className="text-sm font-semibold text-text group-hover:text-brand transition truncate">{drop.title}</p>
           <StatusBadge status={drop.status} />
@@ -255,7 +520,7 @@ function MyDropRow({ drop }: { drop: Drop }) {
           )}
         </div>
       </div>
-      <div className="w-24 shrink-0">
+      <div className="relative z-10 w-24 shrink-0 mt-6 pointer-events-none">
         <div className="h-1.5 bg-surface rounded-full overflow-hidden">
           <div
             className="h-full rounded-full"
@@ -264,6 +529,26 @@ function MyDropRow({ drop }: { drop: Drop }) {
         </div>
         <p className="text-xs text-text-muted text-right mt-0.5">{goalPct.toFixed(0)}% funded</p>
       </div>
-    </Link>
+      {drop.status !== 'expired' && (
+        <Link
+          to={`/drop/${drop.id}/edit`}
+          onClick={(e) => e.stopPropagation()}
+          className="absolute top-2 right-18 z-20 text-xs text-text-muted hover:text-brand transition no-underline bg-surface-2/90 backdrop-blur px-2 py-1 rounded-full border border-surface-3"
+        >
+          Edit
+        </Link>
+      )}
+
+      {drop.status !== 'dropped'  && (
+        <Link
+        // top right is offest by 16 to be "18" so edit and delete buttons are aligned side by side
+          to={`/drop/${drop.id}/delete`}
+          onClick={(e) => e.stopPropagation()}
+          className="text-red-500 absolute top-2 right-3 z-20 text-xs text-text-muted hover:text-brand transition no-underline bg-surface-2/90 backdrop-blur px-2 py-1 rounded-full border border-surface-3"
+        >
+          Delete
+        </Link>
+      )}
+    </div>
   );
 }

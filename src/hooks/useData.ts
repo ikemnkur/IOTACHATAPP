@@ -13,6 +13,7 @@ export interface ServerDrop {
   fileType: Drop['fileType'];
   fileSize: number | null;
   filePath: string | null;
+  link?: string | null;
   originalFileName: string | null;
   mimeType: string | null;
   thumbnailUrl: string | null;
@@ -20,6 +21,7 @@ export interface ServerDrop {
   tags: string | string[] | null;
   scheduledDropTime: string;
   actualDropTime: string | null;
+  fusetime?: number | string | null;
   expiresAt: string;
   goalAmount: number;
   currentContributions: number;
@@ -37,10 +39,14 @@ export interface ServerDrop {
   totalRevenue: number;
   avgRating: number | string | null;
   reviewCount: number;
+  flagCount: number;
   likeCount: number;
   dislikeCount: number;
+  views?: number;
+  view?: number;
   status: Drop['status'];
   isPublic: number | boolean;
+  mature?: number | boolean;
   created_at: string;
   updated_at?: string;
   expiry_behaviour?: 'refund' | 'keep';
@@ -55,12 +61,13 @@ export interface ServerDrop {
 
 export function mapDrop(d: ServerDrop): Drop & { myContribution?: number } {
   const tags = typeof d.tags === 'string' ? JSON.parse(d.tags) : (d.tags || []);
+  const creatorName = String(d.creatorName || '').trim() || String(d.creatorId || '').trim() || 'Unknown';
   return {
     id: d.id,
     title: d.title,
     description: d.description || '',
     creatorId: d.creatorId,
-    creatorName: d.creatorName || 'Unknown',
+    creatorName: d.creatorName || creatorName,
     creatorAvatar: d.creatorAvatar || `https://i.pravatar.cc/150?u=${d.creatorId}`,
     trailerUrl: d.trailerUrl || '',
     thumbnailUrl: d.thumbnailUrl || '',
@@ -70,8 +77,12 @@ export function mapDrop(d: ServerDrop): Drop & { myContribution?: number } {
     filePath: d.filePath ?? null,
     originalFileName: d.originalFileName ?? null,
     mimeType: d.mimeType ?? null,
+    link: d.link ?? null,
     scheduledDropTime: new Date(d.scheduledDropTime).getTime(),
     actualDropTime: d.actualDropTime ? new Date(d.actualDropTime).getTime() : null,
+    fuseTime: d.fusetime != null
+      ? Number(d.fusetime)
+      : Math.max(0, new Date(d.scheduledDropTime).getTime() - new Date(d.created_at).getTime()),
     createdAt: new Date(d.created_at).getTime(),
     expiresAt: new Date(d.expiresAt).getTime(),
     goalAmount: d.goalAmount,
@@ -92,6 +103,9 @@ export function mapDrop(d: ServerDrop): Drop & { myContribution?: number } {
     reviewCount: d.reviewCount ?? 0,
     likeCount: d.likeCount ?? 0,
     dislikeCount: d.dislikeCount ?? 0,
+    views: d.views ?? d.view ?? 0,
+    flagCount: d.flagCount ?? 0,
+    mature: Boolean(d.mature ?? 0),
     status: d.status,
     isPublic: Boolean(d.isPublic),
     tags,
@@ -133,6 +147,12 @@ interface DashboardResponse {
   stats: DashboardStats;
 }
 
+interface DashboardCreatorProfile {
+  id: string;
+  username?: string;
+  profilePicture?: string;
+}
+
 export function useDashboard() {
   const { isAuthenticated, updateBalance } = useAuth();
   const [data, setData] = useState<DashboardData | null>(null);
@@ -149,9 +169,58 @@ export function useDashboard() {
     setError('');
     try {
       const res = await api.get<DashboardResponse>('/api/dashboard');
+
+      const allDrops = [...(res.myDrops || []), ...(res.contributed || [])];
+      const missingCreatorIds = Array.from(new Set(
+        allDrops
+          .filter((drop) => {
+            const rawName = String(drop.creatorName || '').trim();
+            const creatorId = String(drop.creatorId || '').trim();
+            return !rawName || rawName === creatorId;
+          })
+          .map((drop) => String(drop.creatorId || '').trim())
+          .filter(Boolean)
+      ));
+
+      const creatorById = new Map<string, { username?: string; profilePicture?: string }>();
+      if (missingCreatorIds.length) {
+        const creatorLookups = await Promise.all(
+          missingCreatorIds.map(async (creatorId) => {
+            try {
+              const profile = await api.get<DashboardCreatorProfile>(`/api/users/${encodeURIComponent(creatorId)}`);
+              return [creatorId, profile] as const;
+            } catch {
+              return [creatorId, null] as const;
+            }
+          })
+        );
+
+        creatorLookups.forEach(([creatorId, profile]) => {
+          if (!profile) return;
+          creatorById.set(creatorId, {
+            username: String(profile.username || '').trim() || undefined,
+            profilePicture: String(profile.profilePicture || '').trim() || undefined,
+          });
+        });
+      }
+
+      const withCreatorProfile = (drop: ServerDrop): ServerDrop => {
+        const creatorId = String(drop.creatorId || '').trim();
+        const creator = creatorById.get(creatorId);
+        const currentName = String(drop.creatorName || '').trim();
+        const currentAvatar = String(drop.creatorAvatar || '').trim();
+        return {
+          ...drop,
+          creatorName: currentName && currentName !== creatorId
+            ? currentName
+            : (creator?.username || currentName || creatorId),
+          creatorAvatar: currentAvatar || creator?.profilePicture || drop.creatorAvatar,
+        };
+      };
+
       setData({
-        myDrops: res.myDrops.map(mapDrop),
-        contributed: res.contributed.map(mapDrop),
+        myDrops: res.myDrops.map(withCreatorProfile).map(mapDrop),
+        contributed: res.contributed.map(withCreatorProfile).map(mapDrop),
         stats: res.stats,
       });
       // Sync credit balance from dashboard response without triggering a re-fetch loop
@@ -307,8 +376,8 @@ export interface PurchaseEntry {
 interface PurchasesResponse {
   purchases: {
     id: string;
-    credits: number;
-    amountPaid: number;
+    credits: number | string | null;
+    amountPaid: number | string | null;
     currency: string;
     paymentMethod: string;
     status: string;
@@ -333,8 +402,8 @@ export function usePurchaseHistory() {
         if (cancelled) return;
         setEntries(res.purchases.map(p => ({
           id: p.id,
-          credits: p.credits,
-          amountPaid: p.amountPaid,
+          credits: Number.isFinite(Number(p.credits)) ? Number(p.credits) : 0,
+          amountPaid: Number.isFinite(Number(p.amountPaid)) ? Number(p.amountPaid) : 0,
           currency: p.currency || 'USD',
           paymentMethod: p.paymentMethod,
           status: p.status,
@@ -421,32 +490,35 @@ export function useDownloadHistory() {
   return { entries, loading, error };
 }
 
-// ── Membership history hook ────────────────────────────────
+// ── Subscription history hook ────────────────────────────────
 
-export interface MembershipEntry {
+export interface SubscriptionEntry {
   id: string;
-  plan: 'standard' | 'premium';
+  plan: string;
+  planName: string;
   amount: number;
   billingPeriod: string;
   status: string;
+  currentPeriodStart: number;
+  currentPeriodEnd: number;
   timestamp: number;
 }
 
-interface MembershipsResponse {
-  memberships: {
+interface SubscriptionsResponse {
+  subscriptions: {
     id: string;
-    plan: 'standard' | 'premium';
-    amount: number;
-    billingPeriod: string;
+    plan: string;
+    current_period_start: string | null;
+    current_period_end: string | null;
     status: string;
     created_at: string;
   }[];
   activePlan: string | null;
 }
 
-export function useMembershipHistory() {
+export function useSubscriptionHistory() {
   const { isAuthenticated } = useAuth();
-  const [entries, setEntries] = useState<MembershipEntry[]>([]);
+  const [entries, setEntries] = useState<SubscriptionEntry[]>([]);
   const [activePlan, setActivePlan] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -457,19 +529,32 @@ export function useMembershipHistory() {
     (async () => {
       setLoading(true);
       try {
-        const res = await api.get<MembershipsResponse>('/api/history/memberships');
+        const res = await api.get<SubscriptionsResponse>('/api/history/subscriptions');
         if (cancelled) return;
-        setEntries(res.memberships.map(m => ({
-          id: m.id,
-          plan: m.plan,
-          amount: m.amount,
-          billingPeriod: m.billingPeriod,
-          status: m.status,
-          timestamp: new Date(m.created_at).getTime(),
-        })));
+        setEntries(res.subscriptions.map(m => {
+          const planLower = (m.plan || '').toLowerCase();
+          const amount = planLower === 'standard' ? 10000 : planLower === 'premium' ? 20000 : 0;
+          const periodStart = m.current_period_start ? new Date(m.current_period_start).getTime() : 0;
+          const periodEnd = m.current_period_end ? new Date(m.current_period_end).getTime() : 0;
+          const billingPeriod = periodStart && periodEnd
+            ? `${new Date(periodStart).toLocaleDateString()} - ${new Date(periodEnd).toLocaleDateString()}`
+            : 'N/A';
+          
+          return {
+            id: m.id,
+            plan: planLower,
+            planName: m.plan || 'Unknown',
+            amount,
+            billingPeriod,
+            status: m.status,
+            currentPeriodStart: periodStart,
+            currentPeriodEnd: periodEnd,
+            timestamp: new Date(m.created_at).getTime(),
+          };
+        }));
         setActivePlan(res.activePlan);
       } catch {
-        if (!cancelled) setError('Failed to load membership history');
+        if (!cancelled) setError('Failed to load subscription history');
       } finally {
         if (!cancelled) setLoading(false);
       }

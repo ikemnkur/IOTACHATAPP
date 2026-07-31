@@ -1,43 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
-
 interface Props {
   remainingSeconds: number;
-  burnRate: number;
   size?: number;
+  label?: string;
+  notice?: string;
 }
 
-export default function AnalogClock({ remainingSeconds, burnRate, size: sizeProp }: Props) {
-  const [remaining, setRemaining] = useState(remainingSeconds);
-  const remainingRef = useRef(remainingSeconds);
-  const lastFrameRef = useRef(performance.now());
-  const rafRef = useRef<number>(0);
-
-  useEffect(() => {
-    remainingRef.current = remainingSeconds;
-    setRemaining(remainingSeconds);
-  }, [remainingSeconds]);
-
-  useEffect(() => {
-    const frameInterval = 1000 / 30; // 30 fps
-    let lastRender = performance.now();
-
-    const tick = (now: number) => {
-      const elapsed = now - lastRender;
-      if (elapsed >= frameInterval) {
-        lastRender = now - (elapsed % frameInterval);
-        const dt = (now - lastFrameRef.current) / 1000;
-        lastFrameRef.current = now;
-        remainingRef.current = Math.max(0, remainingRef.current - burnRate * dt);
-        setRemaining(remainingRef.current);
-      }
-      rafRef.current = requestAnimationFrame(tick);
-    };
-
-    lastFrameRef.current = performance.now();
-    rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [burnRate]);
-
+export default function AnalogClock({ remainingSeconds, size: sizeProp, label, notice }: Props) {
+  const remaining = Math.max(0, remainingSeconds);
   const expired = remaining <= 0;
 
   const days = Math.floor(remaining / 86400);
@@ -112,8 +81,13 @@ export default function AnalogClock({ remainingSeconds, burnRate, size: sizeProp
           </div>
         )}
         <p className={`text-xs mt-1 ${expired ? 'text-red-400' : 'text-text-muted'}`}>
-          {expired ? 'Drop window closed' : 'Estimated time until drop'}
+          {expired ? 'Drop window closed' : (label || 'Time left until drop')}
         </p>
+        {notice && !expired && (
+          <p className="text-[10px] mt-1 text-text-muted">
+            {notice}
+        </p>
+        )}
       </div>
     </div>
   );

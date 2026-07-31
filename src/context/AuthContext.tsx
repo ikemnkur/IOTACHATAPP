@@ -18,18 +18,20 @@ interface AuthState {
   verifyTOTP: (code: string) => Promise<void>;
   useRecoveryCode: (recoveryCode: string) => Promise<void>;
   clearTwoFAChallenge: () => void;
+  googleAuth: (credential: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
 
-const TOKEN_KEY = 'IotaChat_token';
-const USER_KEY = 'IotaChat_user';
+const TOKEN_KEY = 'drauwper_token';
+const USER_KEY = 'drauwper_user';
 
 interface LoginResponse {
   token?: string;
   tokenExpiry?: number;
-  user?: { id: string; username: string; email: string; credits: number; avatar?: string; joined?: string; accountType?: string; accountStatus?: string };
-  accountType?: string;
+  user?: { id: string; username: string; email: string; credits: number; avatar?: string; joined?: string; accountPlan?: string; accountStatus?: string };
+  accountPlan?: string;
+  // accountPlan?: string;
   message?: string;
   requires2FASetup?: boolean;
   requiresTOTP?: boolean;
@@ -38,7 +40,7 @@ interface LoginResponse {
 
 interface RegisterResponse {
   success?: boolean;
-  user?: { id: string; username: string; email: string; credits: number; avatar?: string; joined?: string; accountType?: string; accountStatus?: string };
+  user?: { id: string; username: string; email: string; credits: number; avatar?: string; joined?: string; accountPlan?: string; accountStatus?: string };
   token?: string;
   message?: string;
   requires2FASetup?: boolean;
@@ -58,8 +60,8 @@ interface TwoFASetupResponse {
 interface TwoFAEnableResponse {
   token: string;
   tokenExpiry: number;
-  user: { id: string; username: string; email: string; credits: number; accountType?: string };
-  accountType: string;
+  user: { id: string; username: string; email: string; credits: number; accountPlan?: string };
+  accountPlan: string;
   recoveryCodes: string[];
   verification?: unknown;
 }
@@ -67,13 +69,13 @@ interface TwoFAEnableResponse {
 interface TwoFAVerifyResponse {
   token: string;
   tokenExpiry: number;
-  user: { id: string; username: string; email: string; credits: number; accountType?: string };
-  accountType: string;
+  user: { id: string; username: string; email: string; credits: number; accountPlan?: string };
+  accountPlan: string;
   verification?: unknown;
 }
 
 interface UserResponse {
-  user: { id: string; username: string; email: string; credits: number; avatar?: string; dateCreated?: string; verification?: string; accountType?: string; accountStatus?: string };
+  user: { id: string; username: string; email: string; credits: number; avatar?: string; dateCreated?: string; verification?: string; accountPlan?: string; accountStatus?: string };
   token: string;
 }
 
@@ -87,7 +89,7 @@ function mapServerUser(u: {
   joined?: string;
   dateCreated?: string;
   verification?: string;
-  accountType?: string;
+  accountPlan?: string;
   accountStatus?: string;
 }): User {
   return {
@@ -98,7 +100,8 @@ function mapServerUser(u: {
     creditBalance: u.credits,
     joined: u.joined ? new Date(u.joined).getTime() : u.dateCreated ? new Date(u.dateCreated).getTime() : Date.now(),
     verification: u.verification || 'none',
-    accountType: u.accountType || 'free',
+    accountPlan: u.accountPlan || 'free',
+    // accountPlan: u.accountPlan || 'creator',
     accountStatus: u.accountStatus || 'active',
   };
 }
@@ -132,6 +135,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(newUser);
   }, []);
 
+    // inside AuthContext
+ const googleAuth = useCallback(async (credential: string) => {
+     const res = await api.post<LoginResponse>('/api/auth/google', { credential });
+     if (res.token && res.user) {
+       const mapped = mapServerUser({ ...res.user, accountPlan: res.user.accountPlan ?? res.accountPlan });
+       persist(res.token, mapped);
+     }
+   }, [persist]);
+
   const clear = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
@@ -150,27 +162,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (res.token && res.user) {
-      const mapped = mapServerUser({ ...res.user, accountType: res.user.accountType ?? res.accountType });
+      const mapped = mapServerUser({ ...res.user, accountPlan: res.user.accountPlan ?? res.accountPlan });
       persist(res.token, mapped);
     }
   }, [persist]);
 
   const register = useCallback(async (username: string, email: string, password: string) => {
-    const res = await api.post<RegisterResponse>('/api/auth/register', {
-      username,
-      email,
-      password,
-      firstName: username,
-    });
-    if (res.requires2FASetup && res.tempToken) {
-      setTwoFAChallenge({ type: 'needs_setup', tempToken: res.tempToken });
-      return;
-    }
-    if (res.token && res.user) {
-      const mapped = mapServerUser(res.user);
-      persist(res.token, mapped);
-    }
-  }, [persist]);
+     await api.post<RegisterResponse>('/api/auth/register', {
+       username, email, password, firstName: username,
+     });
+     // No session yet — user must verify their email, then log in.
+   }, []);
+
+
+  // const register = useCallback(async (username: string, email: string, password: string) => {
+  //   const res = await api.post<RegisterResponse>('/api/auth/register', {
+  //     username,
+  //     email,
+  //     password,
+  //     firstName: username,
+  //   });
+  //   if (res.requires2FASetup && res.tempToken) {
+  //     setTwoFAChallenge({ type: 'needs_setup', tempToken: res.tempToken });
+  //     return;
+  //   }
+  //   if (res.token && res.user) {
+  //     const mapped = mapServerUser(res.user);
+  //     persist(res.token, mapped);
+  //   }
+  // }, [persist]);
 
   const setup2FA = useCallback(async (): Promise<{ qrUrl: string; secret: string }> => {
     if (!twoFAChallenge || twoFAChallenge.type !== 'needs_setup') {
@@ -190,7 +210,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       tempToken: twoFAChallenge.tempToken,
       code,
     });
-    const mapped = mapServerUser({ ...res.user, accountType: res.user.accountType ?? res.accountType });
+    const mapped = mapServerUser({ ...res.user, accountPlan: res.user.accountPlan ?? res.accountPlan });
     persist(res.token, mapped);
     setTwoFAChallenge(null);
     return { recoveryCodes: res.recoveryCodes };
@@ -204,7 +224,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       tempToken: twoFAChallenge.tempToken,
       code,
     });
-    const mapped = mapServerUser({ ...res.user, accountType: res.user.accountType ?? res.accountType });
+    const mapped = mapServerUser({ ...res.user, accountPlan: res.user.accountPlan ?? res.accountPlan });
     persist(res.token, mapped);
     setTwoFAChallenge(null);
   }, [twoFAChallenge, persist]);
@@ -217,7 +237,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       tempToken: twoFAChallenge.tempToken,
       recoveryCode,
     });
-    const mapped = mapServerUser({ ...res.user, accountType: res.user.accountType ?? res.accountType });
+    const mapped = mapServerUser({ ...res.user, accountPlan: res.user.accountPlan ?? res.accountPlan });
     persist(res.token, mapped);
     setTwoFAChallenge(null);
   }, [twoFAChallenge, persist]);
@@ -273,6 +293,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         verifyTOTP,
         useRecoveryCode,
         clearTwoFAChallenge,
+        googleAuth
       }}
     >
       {children}

@@ -1,6 +1,6 @@
 import { useParams, Link } from 'react-router-dom';
 import { SocialIcon } from 'react-social-icons';
-import { Heart, Star, Users, Package, CreditCard, Calendar, ArrowLeft, Flame, Globe, Pencil } from 'lucide-react';
+import { Heart, Star, Users, Package, CreditCard, Calendar, ArrowLeft, Flame, Globe, Pencil, Search, ChevronDown, ChevronUp } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
@@ -20,6 +20,8 @@ interface ServerProfile {
   createdAt: string;
   followerCount: number;
   followingCount: number;
+  likesReceived60d?: number;
+  dislikesReceived60d?: number;
   bannerUrl?: string | null;
   bioVideoUrl?: string | null;
   socialLinks?: string | SocialLinks | null;
@@ -40,6 +42,8 @@ function mapProfile(s: ServerProfile): CreatorProfile {
     totalDrops: s.totalDropsCreated ?? 0,
     totalCreditsEarned: s.totalCreditsEarned ?? 0,
     joined: new Date(s.createdAt).getTime(),
+    likesReceived60d: s.likesReceived60d ?? 0,
+    dislikesReceived60d: s.dislikesReceived60d ?? 0,
     bannerUrl: s.bannerUrl || undefined,
     bioVideoUrl: s.bioVideoUrl || undefined,
     socialLinks,
@@ -56,6 +60,8 @@ export default function UserProfile() {
   const [following, setFollowing] = useState(false);
   const [followerCount, setFollowerCount] = useState(0);
   const [followLoading, setFollowLoading] = useState(false);
+  const [showUserStats, setShowUserStats] = useState(false);
+  const [dropQuery, setDropQuery] = useState('');
 
   useEffect(() => {
     if (!id) return;
@@ -122,8 +128,25 @@ export default function UserProfile() {
     );
   }
 
-  const activeDrops = userDrops.filter((d) => d.status === 'active' || d.status === 'pending');
-  const pastDrops = userDrops.filter((d) => d.status === 'dropped' || d.status === 'expired');
+  const dropQueryNorm = dropQuery.trim().toLowerCase();
+  const filteredDrops = userDrops.filter((d) => {
+    if (!dropQueryNorm) return true;
+    const tagsJoined = (d.tags || []).join(' ').toLowerCase();
+    return (
+      String(d.title || '').toLowerCase().includes(dropQueryNorm)
+      || String(d.description || '').toLowerCase().includes(dropQueryNorm)
+      || String(d.status || '').toLowerCase().includes(dropQueryNorm)
+      || tagsJoined.includes(dropQueryNorm)
+    );
+  });
+
+  const activeDrops = filteredDrops.filter((d) => d.status === 'active' || d.status === 'pending');
+  const pastDrops = filteredDrops.filter((d) => d.status === 'dropped' || d.status === 'expired');
+  const releasedDrops = userDrops.filter((d) => d.status === 'dropped');
+  const totalDrops = userDrops.length;
+  const qualityRating = releasedDrops.length > 0
+    ? releasedDrops.reduce((sum, drop) => sum + Number(drop.avgRating ?? 0), 0) / releasedDrops.length
+    : null;
   const avatarFallback = `https://picsum.photos/seed/user-avatar-${profile.id}/240/240`;
   const bannerFallback = `https://picsum.photos/seed/user-banner-${profile.id}/1600/400`;
   const avatarSrc = (profile.avatar || '').trim() || avatarFallback;
@@ -135,12 +158,12 @@ export default function UserProfile() {
     day: 'numeric',
   });
 
-  const ratingColor =
-    profile.rating >= 80 ? 'text-green-500' : profile.rating >= 50 ? 'text-yellow-500' : 'text-red-500';
+  const qualityColor =
+    qualityRating == null ? 'text-text-muted' : qualityRating >= 80 ? 'text-green-500' : qualityRating >= 50 ? 'text-yellow-500' : 'text-red-500';
   const reportHref = `/help?report=1&targetId=${encodeURIComponent(profile.id)}&targetUsername=${encodeURIComponent(profile.username)}`;
 
   return (
-    <div className="max-w-4xl mx-auto py-8 px-4 space-y-6">
+    <div className="max-w-4xl mx-auto py-0 px-4 space-y-3">
       {/* Back link */}
       <Link to="/dashboard" className="inline-flex items-center gap-1 text-sm text-text-muted hover:text-text transition no-underline">
         <ArrowLeft className="w-4 h-4" />
@@ -272,27 +295,120 @@ export default function UserProfile() {
         </div>
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="bg-surface rounded-xl border border-surface-3 p-4 text-center">
-          <Star className={`w-5 h-5 mx-auto mb-1 ${ratingColor}`} />
-          <p className={`text-2xl font-bold ${ratingColor}`}>{profile.rating}%</p>
-          <p className="text-xs text-text-muted">Rating</p>
-        </div>
-        <div className="bg-surface rounded-xl border border-surface-3 p-4 text-center">
-          <Users className="w-5 h-5 mx-auto mb-1 text-brand" />
-          <p className="text-2xl font-bold text-text">{followerCount.toLocaleString()}</p>
-          <p className="text-xs text-text-muted">Followers</p>
-        </div>
-        <div className="bg-surface rounded-xl border border-surface-3 p-4 text-center">
-          <Package className="w-5 h-5 mx-auto mb-1 text-brand" />
-          <p className="text-2xl font-bold text-text">{profile.totalDrops}</p>
-          <p className="text-xs text-text-muted">Drops</p>
-        </div>
-        <div className="bg-surface rounded-xl border border-surface-3 p-4 text-center">
-          <CreditCard className="w-5 h-5 mx-auto mb-1 text-green-500" />
-          <p className="text-2xl font-bold text-text">{(profile.totalCreditsEarned / 1000).toFixed(0)}K</p>
-          <p className="text-xs text-text-muted">Credits Earned</p>
+      {/* Stats Table */}
+      <div className="bg-surface rounded-2xl border border-surface-3 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowUserStats((prev) => !prev)}
+          className="w-full px-4 py-3 text-left flex items-center justify-between hover:bg-surface-2 transition"
+        >
+          <span className="text-sm font-semibold text-text">{showUserStats ? 'Hide User Stats' : 'Show User Stats'}</span>
+          {showUserStats ? <ChevronUp className="w-4 h-4 text-text-muted" /> : <ChevronDown className="w-4 h-4 text-text-muted" />}
+        </button>
+        {showUserStats && (
+          <table className="w-full border-t border-surface-3">
+            <tbody>
+              <tr className="border-b border-surface-3/80">
+                <td className="px-4 py-4 align-top">
+                  <div className="flex items-start gap-3">
+                    <Star className={`mt-0.5 w-5 h-5 shrink-0 ${qualityColor}`} />
+                    <div>
+                      <p className="text-sm font-semibold text-text">Quality Rating</p>
+                      <p className="text-xs text-text-muted">Average quality rating from released/dropped drops</p>
+                    </div>
+                  </div>
+                </td>
+                <td className={`px-4 py-4 align-top text-right text-lg font-bold whitespace-nowrap ${qualityColor}`}>
+                  {qualityRating == null ? '--' : `${qualityRating.toFixed(1)}%`}
+                </td>
+              </tr>
+              <tr className="border-b border-surface-3/80">
+                <td className="px-4 py-4 align-top">
+                  <div className="flex items-start gap-3">
+                    <Users className="mt-0.5 w-5 h-5 shrink-0 text-brand" />
+                    <div>
+                      <p className="text-sm font-semibold text-text">Followers</p>
+                      <p className="text-xs text-text-muted">People following this creator</p>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-4 align-top text-right text-lg font-bold text-text whitespace-nowrap">
+                  {followerCount.toLocaleString()}
+                </td>
+              </tr>
+              <tr className="border-b border-surface-3/80">
+                <td className="px-4 py-4 align-top">
+                  <div className="flex items-start gap-3">
+                    <Package className="mt-0.5 w-5 h-5 shrink-0 text-brand" />
+                    <div>
+                      <p className="text-sm font-semibold text-text">Drops</p>
+                      <p className="text-xs text-text-muted">Total drops published by this creator</p>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-4 align-top text-right text-lg font-bold text-text whitespace-nowrap">
+                  {totalDrops.toLocaleString()}
+                </td>
+              </tr>
+              <tr className="border-b border-surface-3/80">
+                <td className="px-4 py-4 align-top">
+                  <div className="flex items-start gap-3">
+                    <CreditCard className="mt-0.5 w-5 h-5 shrink-0 text-green-500" />
+                    <div>
+                      <p className="text-sm font-semibold text-text">Credits Earned</p>
+                      <p className="text-xs text-text-muted">Total credits earned across drops</p>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-4 align-top text-right text-lg font-bold text-text whitespace-nowrap">
+                  {(profile.totalCreditsEarned / 1000).toFixed(0)}K
+                </td>
+              </tr>
+              <tr className="border-b border-surface-3/80">
+                <td className="px-4 py-4 align-top">
+                  <div className="flex items-start gap-3">
+                    <Heart className="mt-0.5 w-5 h-5 shrink-0 text-red-400" />
+                    <div>
+                      <p className="text-sm font-semibold text-text">Likes Received</p>
+                      <p className="text-xs text-text-muted">Last 60 days across this creator&apos;s drops</p>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-4 align-top text-right text-lg font-bold text-text whitespace-nowrap">
+                  {(profile.likesReceived60d ?? 0).toLocaleString()}
+                </td>
+              </tr>
+              <tr>
+                <td className="px-4 py-4 align-top">
+                  <div className="flex items-start gap-3">
+                    <Heart className="mt-0.5 w-5 h-5 shrink-0 text-slate-400" />
+                    <div>
+                      <p className="text-sm font-semibold text-text">Dislikes Received</p>
+                      <p className="text-xs text-text-muted">Last 60 days across this creator&apos;s drops</p>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-4 align-top text-right text-lg font-bold text-text whitespace-nowrap">
+                  {(profile.dislikesReceived60d ?? 0).toLocaleString()}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Drop Search */}
+      <div className="bg-surface rounded-2xl border border-surface-3 p-4">
+        <label className="text-xs text-text-muted mb-2 block">Search this creator&apos;s drops</label>
+        <div className="relative">
+          <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={dropQuery}
+            onChange={(e) => setDropQuery(e.target.value)}
+            placeholder="Search by title, description, tag, or status"
+            className="w-full bg-surface-2 border border-surface-3 rounded-xl pl-10 pr-3 py-2.5 text-sm text-text focus:outline-none focus:border-brand"
+          />
         </div>
       </div>
 
@@ -327,10 +443,12 @@ export default function UserProfile() {
       )}
 
       {/* No drops */}
-      {userDrops.length === 0 && (
+      {filteredDrops.length === 0 && (
         <div className="bg-surface rounded-xl border border-surface-3 p-8 text-center">
           <Package className="w-8 h-8 text-text-muted mx-auto mb-3" />
-          <p className="text-text-muted">This user hasn't created any drops yet.</p>
+          <p className="text-text-muted">
+            {dropQueryNorm ? 'No drops match your search.' : "This user hasn't created any drops yet."}
+          </p>
         </div>
       )}
 
@@ -356,6 +474,7 @@ export default function UserProfile() {
 }
 
 function DropCard({ drop }: { drop: import('../types').Drop }) {
+  const API_BASE = import.meta.env.VITE_API_URL || '';
   const pct = Math.min(100, Math.round((drop.currentContributions / drop.goalAmount) * 100));
   const statusColors: Record<string, string> = {
     active: 'bg-green-500/15 text-green-400',
@@ -363,12 +482,33 @@ function DropCard({ drop }: { drop: import('../types').Drop }) {
     dropped: 'bg-blue-500/15 text-blue-400',
     expired: 'bg-red-500/15 text-red-400',
   };
+  const thumbRaw = String(drop.thumbnailUrl || '').trim();
+  const thumbFallback = `https://picsum.photos/seed/profile-drop-${drop.id}/600/320`;
+  const thumbnailSrc = thumbRaw
+    ? (/^https?:\/\//i.test(thumbRaw)
+      ? thumbRaw
+      : thumbRaw.startsWith('/')
+        ? `${API_BASE}${thumbRaw}`
+        : `${API_BASE}/${thumbRaw}`)
+    : thumbFallback;
 
   return (
     <Link
       to={drop.status === 'dropped' ? `/drop/${drop.id}/download` : `/drop/${drop.id}`}
       className="block bg-surface-2 rounded-xl border border-surface-3 p-4 hover:border-brand/50 transition no-underline group"
     >
+      <div className="w-full h-28 rounded-lg overflow-hidden bg-surface-3 mb-3">
+        <img
+          src={thumbnailSrc}
+          alt={`${drop.title} thumbnail`}
+          className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform"
+          onError={(e) => {
+            const img = e.currentTarget;
+            if (img.src !== thumbFallback) img.src = thumbFallback;
+          }}
+        />
+      </div>
+
       <div className="flex items-start justify-between mb-2">
         <h3 className="text-sm font-semibold text-text group-hover:text-brand transition truncate pr-2">
           {drop.title}
